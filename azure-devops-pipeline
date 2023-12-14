@@ -1,0 +1,103 @@
+trigger:
+- main
+
+#pr:
+#- main
+
+pool:
+  name: Azure-pool
+
+#pool:
+#  name: Default
+
+variables:
+- group: Azure-variables
+
+stages:
+- stage: BuildApp
+  jobs: 
+  - job: BuildDockerfile
+    steps:
+    - script: |
+        docker login
+        docker build -t myazureimage:$(TAG) .
+        docker tag myazureimage:$(TAG) $(accountid).dkr.ecr.$(region).amazonaws.com/myazureimage:$(TAG)
+        aws ecr get-login-password --region $(region) | docker login --username AWS --password-stdin $(accountid).dkr.ecr.$(region).amazonaws.com
+        docker push $(accountid).dkr.ecr.$(region).amazonaws.com/myazureimage:$(TAG)
+  
+
+#  - job: DeployProd
+#    steps:
+#   - task: AzureRmWebAppDeployment@4
+#      inputs:
+#        ConnectionType: 'AzureRM'
+#        azureSubscription: 'Azure'
+#        appType: 'webAppContainer'
+#        WebAppName: 'ADODemo-prod'
+#        DockerNamespace: '$(IMAGE_REGISTRY)' 
+#        DockerRepository: '$(IMAGE_REPOSITORY)'
+#        DockerImageTag: '$(TAG)'
+
+
+      
+  - job: DeployDev
+    dependsOn: BuildDockerfile
+    steps:
+    - task: DownloadSecureFile@1
+      name: sshkey
+      inputs:
+       secureFile: 'azure-key.pem'
+    - script: |
+        chmod 400 $(sshKey.secureFilePath)
+        ssh -o StrictHostKeyChecking=no -i $(sshKey.secureFilePath) ubuntu@52.23.228.167 "
+          aws ecr get-login-password --region $(region) | docker login --username $(username) --password-stdin $(accountid).dkr.ecr.$(region).amazonaws.com
+          docker pull $(accountid).dkr.ecr.$(region).amazonaws.com/myazureimage:$(TAG)
+          docker run -d -p 9000:80 $(accountid).dkr.ecr.$(region).amazonaws.com/myazureimage:$(TAG)"
+
+- stage: Testing
+  jobs: 
+  - job: Testdev
+    steps:
+    - task: DownloadSecureFile@1
+      name: sshkey
+      inputs:
+       secureFile: 'azure-key.pem'
+    - script: |
+        pwd
+        chmod 400 $(sshKey.secureFilePath)
+        scp -i  $(sshKey.secureFilePath) $(Build.Repository.LocalPath)/test.sh ubuntu@52.23.228.167:/home/ubuntu/
+        ssh -o StrictHostKeyChecking=no -i $(sshKey.secureFilePath) ubuntu@52.23.228.167 "
+        sh test.sh"
+        
+- stage: DeployProdAWS
+  jobs: 
+  - job: ApproveRelease
+    timeoutInMinutes: 4320 # job times out in 3 days
+    pool: server
+    steps:
+    - task: ManualValidation@0
+      timeoutInMinutes: 1440 # task times out in 1 day
+      inputs:
+       notifyUsers: 'preethi.r.goud@gmail.com'
+       instructions: 'Please validate and approve deployment to prod'
+  - job: DeployProd
+    dependsOn: ApproveRelease
+    steps:
+    - task: DownloadSecureFile@1
+      name: sshkey
+      inputs:
+       secureFile: 'azure-key.pem'
+    - script: |
+        chmod 400 $(sshKey.secureFilePath)
+        ssh -o StrictHostKeyChecking=no -i $(sshKey.secureFilePath) ubuntu@3.95.37.161 "
+          aws ecr get-login-password --region $(region) | docker login --username $(username) --password-stdin $(accountid).dkr.ecr.$(region).amazonaws.com
+          docker pull $(accountid).dkr.ecr.$(region).amazonaws.com/myazureimage:$(TAG)
+          docker run -d -p 9000:80 $(accountid).dkr.ecr.$(region).amazonaws.com/myazureimage:$(TAG)"
+
+    - task: UniversalPackages@0
+      displayName: Publish a Universal Package
+      inputs:
+        command: publish
+        publishDirectory: '$(Build.ArtifactStagingDirectory)'
+        vstsFeedPublish: 'AzureDemo/Dockerfeed'
+        vstsFeedPackagePublish: 'docker_package'
